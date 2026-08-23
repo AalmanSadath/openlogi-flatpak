@@ -213,40 +213,73 @@ jobs:
       - name: Merge both architectures into one signed repository
         if: steps.gpg.outputs.configured == 'true'
         run: |
-          # Rebuilt from scratch each release rather than appended to: GitHub
-          # Pages caps a site at 1 GB and an accumulating OSTree store would
-          # reach it within a handful of releases, while clients only ever need
-          # the current commit to update.
+          # Seeded from what is already published, then bounded by
+          # --prune-depth below. A release is ~64 MB across both arches, so a
+          # three-deep store sits near 190 MB against the 1 GB Pages cap, and
+          # keeping parents buys two things a from-scratch rebuild cannot:
+          # clients can roll back to a previous commit, and static deltas have
+          # something to delta against instead of every update being a full
+          # download.
           # ostree init does not create parents.
           mkdir -p site/repo
           ostree --repo=site/repo init --mode=archive-z2
-          for repo in arch-repos/flatpak-repo-*; do
-            echo "pulling $(basename "$repo")"
+
+          published_repo="https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}/repo/"
+          if curl -fsSL -o /dev/null "${published_repo}config"; then
+            echo "seeding from ${published_repo}"
+            # --no-gpg-verify: these commits were signed by this workflow on the
+            # way out and are re-signed below; verifying here would need the
+            # public key imported purely to read our own history back.
             ostree --repo=site/repo remote add --no-gpg-verify \
-              --if-not-exists "$(basename "$repo")" "file://${PWD}/${repo}"
-            ostree --repo=site/repo pull --mirror "$(basename "$repo")"
-          done
-
-          # Sign the commits themselves. flatpak-builder creates them in the
-          # build jobs, which have no access to the key, and
+              --if-not-exists published "${published_repo}"
+            ostree --repo=site/repo pull --mirror published \
+              || echo "could not seed from the published repo; continuing without history"
+          else
+            echo "no published repository yet; starting a fresh store"
+          fi
+          # `ostree pull --mirror` would overwrite each ref with the build
+          # job's commit, which has no parent — the seeded history would become
+          # unreachable and be pruned, leaving --prune-depth nothing to keep.
+          # build-commit-from instead lands the same content as a new commit on
+          # top of whatever the ref already points at, which is what makes the
+          # chain (and therefore rollback and deltas) exist at all.
+          #
+          # It also signs the commits it creates. flatpak-builder makes them in
+          # the build jobs, which have no access to the key, and
           # `build-update-repo --gpg-sign` signs only the summary, while a
-          # client verifies the commit it pulls. Without this every install
-          # fails with "GPG verification enabled, but no signatures found".
-          for ref in $(ostree --repo=site/repo refs); do
-            echo "signing $ref"
-            ostree --repo=site/repo gpg-sign \
-              --gpg-homedir="${GNUPGHOME}" "$ref" "${GPG_FINGERPRINT}"
+          # client verifies the commit it pulls. Without a signature here every
+          # install fails with "GPG verification enabled, but no signatures
+          # found".
+          for repo in arch-repos/flatpak-repo-*; do
+            for ref in $(ostree --repo="$repo" refs); do
+              echo "committing $ref from $(basename "$repo")"
+              flatpak build-commit-from \
+                --src-repo="$repo" --src-ref="$ref" \
+                --gpg-sign="${GPG_FINGERPRINT}" --gpg-homedir="${GNUPGHOME}" \
+                --no-update-summary \
+                site/repo "$ref"
+            done
           done
 
-          # No --generate-static-deltas: with no history to delta against they
-          # are from-scratch copies of every object, roughly doubling a site
-          # that has a 1 GB ceiling.
+          # Deltas are worth generating now that a parent exists: an update
+          # from the previous release ships the changed objects rather than a
+          # full ~33 MB copy, which matters more for the 100 GB/month Pages
+          # bandwidth allowance than the objects themselves do for the 1 GB
+          # size cap. --prune-depth=2 keeps the current commit plus two.
           flatpak build-update-repo \
             --gpg-sign="${GPG_FINGERPRINT}" \
-            --prune --prune-depth=0 \
+            --generate-static-deltas \
+            --prune --prune-depth=2 \
             site/repo
           ostree --repo=site/repo refs
+          # History depth per ref, so a run makes it obvious whether parents
+          # are accumulating or every build is still landing parentless.
+          for ref in $(ostree --repo=site/repo refs); do
+            depth="$(ostree --repo=site/repo log "$ref" | grep -c '^commit ')"
+            echo "${ref}: ${depth} commit(s) retained"
+          done
           du -sh site/repo
+          du -sh site/repo/deltas 2>/dev/null || echo "no deltas generated"
 
       - uses: actions/configure-pages@v5
         if: steps.gpg.outputs.configured == 'true'
