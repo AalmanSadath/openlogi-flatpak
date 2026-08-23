@@ -54,9 +54,11 @@ flatpak run --command=cat org.openlogi.OpenLogi \
   | sudo tee /etc/udev/rules.d/70-openlogi.rules
 
 echo uinput | sudo tee /etc/modules-load.d/openlogi.conf
+
 sudo modprobe uinput
 
 sudo udevadm control --reload-rules
+
 sudo udevadm trigger
 ```
 
