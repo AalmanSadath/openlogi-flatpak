@@ -36,132 +36,21 @@ env:
   RUNTIME_VERSION: "25.08"
 
 jobs:
-  resolve:
-    name: Resolve upstream release
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.pick.outputs.version }}
-      sha256: ${{ steps.pick.outputs.sha256 }}
-      changed: ${{ steps.pick.outputs.changed }}
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Pick the tag and hash its tarball
-        id: pick
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REQUESTED: ${{ inputs.version }}
-          R2_PUBLIC_BASE: ${{ vars.R2_PUBLIC_BASE }}
-        run: |
-          set -euo pipefail
-          if [ -n "${REQUESTED}" ]; then
-            version="${REQUESTED}"
-          else
-            version="$(gh api "repos/${UPSTREAM}/releases/latest" --jq .tag_name)"
-          fi
-          echo "upstream release: ${version}"
-
-          url="https://github.com/${UPSTREAM}/archive/refs/tags/${version}.tar.gz"
-          curl -fsSL "$url" -o src.tar.gz
-          sha256="$(sha256sum src.tar.gz | cut -d' ' -f1)"
-
-          # Skip a scheduled run that would rebuild what is already published.
-          # A manual dispatch always proceeds, so a failed publish can be redone.
-          published=""
-          if [ "${{ github.event_name }}" = "schedule" ] && [ -n "${R2_PUBLIC_BASE}" ]; then
-            published="$(curl -fsSL "${R2_PUBLIC_BASE%/}/published-version" 2>/dev/null || true)"
-          fi
-          if [ "$published" = "$version" ]; then
-            echo "already published ${version}, nothing to do"
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          fi
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
-          echo "sha256=${sha256}" >> "$GITHUB_OUTPUT"
-
+  # The build itself lives in build.yml, which is also dispatchable on its own
+  # to produce nothing but the two `.flatpak` bundles. One definition, so a
+  # release can never be built differently from what the repository serves.
   build:
-    name: Build (${{ matrix.arch }})
-    needs: resolve
-    if: needs.resolve.outputs.changed == 'true'
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: x86_64
-            runner: ubuntu-latest
-          - arch: aarch64
-            runner: ubuntu-24.04-arm
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install flatpak
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y flatpak flatpak-builder ostree
-          flatpak remote-add --if-not-exists --user \
-            flathub https://dl.flathub.org/repo/flathub.flatpakrepo
-
-      - name: Install runtime and SDK
-        run: |
-          flatpak install --user -y --noninteractive flathub \
-            "org.freedesktop.Platform//${RUNTIME_VERSION}" \
-            "org.freedesktop.Sdk//${RUNTIME_VERSION}" \
-            "org.freedesktop.Sdk.Extension.llvm20//${RUNTIME_VERSION}"
-
-      - name: Point the manifest at this release
-        env:
-          VERSION: ${{ needs.resolve.outputs.version }}
-          SHA256: ${{ needs.resolve.outputs.sha256 }}
-        run: |
-          set -euo pipefail
-          python3 - "$VERSION" "$SHA256" <<'PY'
-          import re, sys, datetime
-          version, sha256 = sys.argv[1], sys.argv[2]
-          bare = version.lstrip("v")
-
-          path = "org.openlogi.OpenLogi.yml"
-          text = open(path, encoding="utf-8").read()
-          text = re.sub(r"(archive/refs/tags/)v[^.]*[^/]*\.tar\.gz", rf"\g<1>{version}.tar.gz", text, count=1)
-          text = re.sub(r"(sha256:\s*)[0-9a-f]{64}", rf"\g<1>{sha256}", text, count=1)
-          open(path, "w", encoding="utf-8").write(text)
-
-          # AppStream drives what software centres call the latest version, so a
-          # stale <release> advertises the wrong one whatever the build contains.
-          path = "org.openlogi.OpenLogi.metainfo.xml"
-          text = open(path, encoding="utf-8").read()
-          today = datetime.date.today().isoformat()
-          text = re.sub(
-              r'<release version="[^"]*" date="[^"]*"/>',
-              f'<release version="{bare}" date="{today}"/>',
-              text,
-              count=1,
-          )
-          open(path, "w", encoding="utf-8").write(text)
-          print(f"building {version} ({sha256[:12]}…)")
-          PY
-          grep -E "archive/refs/tags|sha256:" org.openlogi.OpenLogi.yml
-
-      - name: Build
-        run: |
-          flatpak-builder --user --disable-rofiles-fuse --force-clean \
-            --repo=repo --default-branch=stable \
-            build "${FLATPAK_ID}.yml"
-          flatpak build-update-repo repo
-          ostree --repo=repo refs
-          du -sh repo
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: flatpak-repo-${{ matrix.arch }}
-          path: repo
-          retention-days: 7
-          compression-level: 0 # OSTree objects are already compressed
+    name: Build
+    uses: ./.github/workflows/build.yml
+    with:
+      version: ${{ inputs.version }}
 
   publish:
     name: Publish to R2
-    needs: [resolve, build]
+    needs: build
+    # The called workflow succeeds even when its build job skipped, so the
+    # skip has to be read from the output rather than inferred from `needs`.
+    if: needs.build.outputs.changed == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -409,7 +298,7 @@ jobs:
       - name: Write the remote descriptors
         if: steps.gate.outputs.configured == 'true'
         env:
-          VERSION: ${{ needs.resolve.outputs.version }}
+          VERSION: ${{ needs.build.outputs.version }}
           R2_PUBLIC_BASE: ${{ vars.R2_PUBLIC_BASE }}
         run: |
           set -euo pipefail
@@ -568,7 +457,7 @@ jobs:
         if: steps.gate.outputs.configured == 'true'
         env:
           R2_PUBLIC_BASE: ${{ vars.R2_PUBLIC_BASE }}
-          VERSION: ${{ needs.resolve.outputs.version }}
+          VERSION: ${{ needs.build.outputs.version }}
         run: |
           set -euo pipefail
           base="${R2_PUBLIC_BASE%/}"
