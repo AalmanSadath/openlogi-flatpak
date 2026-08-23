@@ -21,13 +21,9 @@ Software and KDE Discover in the background) keeps it current.
 
 ```sh
 flatpak remote-add --if-not-exists --user openlogi \
-  https://REPO-BASE-URL/openlogi.flatpakrepo
+  https://pub-6ed3b1ed2aca4c86bee37540a77a81ec.r2.dev/openlogi.flatpakrepo
 flatpak install --user openlogi org.openlogi.OpenLogi
 ```
-
-> The repository is moving off GitHub Pages, whose 100 GB/month allowance and
-> file-hosting terms do not survive the update traffic this is heading for. The
-> URL above is filled in once the new bucket is live.
 
 ## One-time host setup
 
@@ -134,12 +130,18 @@ Pages' own terms do not intend to cover for file distribution. R2 charges nothin
 for egress, which also removes the reason to keep the retained history shallow:
 the publish job re-downloads the store it is extending on every run.
 
-R2 does bill Class B operations, and a full pull of an archive-z2 store is a few
-thousand of them because every object is its own request. Static deltas keep the
-common case to a handful. Putting the bucket behind a Cloudflare custom domain
-would serve repeat requests from cache without billing them at all, and lifts the
-rate limit the `r2.dev` development URL carries; that is the next step, not a
-finished one.
+R2 bills Class B operations rather than bytes, which is the number worth checking
+before trusting the above. A full pull of this store is 49 objects, because
+OpenLogi installs four binaries and a handful of icons rather than the thousands
+of files a typical desktop app carries. At the traffic modelled here that is
+about 3.4M operations a month against a 10M free tier -- and that is the worst
+case, every update a full pull with no delta applied. Storage at depth 8 is
+around 0.6 GB of a 10 GB tier. Egress, the thing that ended the Pages
+arrangement, is 1.87 TB and free.
+
+So a Cloudflare custom domain in front of the bucket is not a cost measure. It is
+worth doing for the rate limit: the `r2.dev` development URL is throttled and
+Cloudflare says plainly not to use it in production.
 
 ### Configuration
 
