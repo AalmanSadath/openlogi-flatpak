@@ -383,6 +383,14 @@ jobs:
           du -sh site/repo/deltas 2>/dev/null || echo "no deltas generated"
           echo "store: $(du -sm site/repo | cut -f1) MB"
 
+          # The real completeness check, and the one worth having before the
+          # upload is allowed to delete anything: fsck walks every object
+          # reachable from every ref and fails on one that is missing or
+          # corrupt. A store that passes this is publishable whatever its
+          # object count happens to be.
+          ostree --repo=site/repo fsck
+          echo "objects: $(find site/repo/objects -type f | wc -l)"
+
       - name: Write the remote descriptors
         if: steps.gate.outputs.configured == 'true'
         env:
@@ -438,13 +446,27 @@ jobs:
           set -euo pipefail
 
           # The last phase deletes whatever the bucket has and the local store
-          # does not. A local store that came out wrong would therefore empty
-          # the remote rather than fail, so check it is plausibly a repository
-          # before anything is allowed to delete.
+          # does not, so a store that came out wrong would empty the remote
+          # rather than fail. Completeness is already proven by `ostree fsck`
+          # in the previous step; what is checked here is the one thing fsck
+          # cannot see, which is how this store compares to the one it is
+          # replacing.
+          #
+          # A fixed floor was the wrong instrument: OpenLogi installs about a
+          # dozen files per arch, so a correct store is well under a hundred
+          # objects and any threshold worth tripping over is a guess. Measuring
+          # against the bucket needs no guess. Half is deliberately loose --
+          # lowering --prune-depth legitimately shrinks the store -- while
+          # still catching the case this exists for, a near-empty local store
+          # about to delete a full remote one.
           objects="$(find site/repo/objects -type f | wc -l)"
-          echo "local store holds ${objects} objects"
-          if [ "$objects" -lt 100 ]; then
-            echo "::error::only ${objects} objects locally; refusing to sync a store this small" >&2
+          # `|| true` is not decoration: pipefail makes the whole substitution
+          # fail when the prefix does not exist yet, which on a fresh bucket
+          # would exit the step instead of reading zero.
+          remote_objects="$(rclone lsf --files-only -R "r2:${BUCKET}/repo/objects" 2>/dev/null | wc -l || true)"
+          echo "local store holds ${objects} objects; bucket holds ${remote_objects}"
+          if [ "$remote_objects" -gt 0 ] && [ "$objects" -lt $((remote_objects / 2)) ]; then
+            echo "::error::local store has ${objects} objects against ${remote_objects} published; refusing to sync" >&2
             exit 1
           fi
 
