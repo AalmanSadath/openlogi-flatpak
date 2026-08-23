@@ -6,6 +6,10 @@
 # itself. This is that missing half, and it needs nothing from upstream: it
 # consumes released tarballs, unmodified.
 #
+# The same store also produces the two `.flatpak` bundles attached to a GitHub
+# release here, tagged with the upstream version. They come out of the merged,
+# signed repository rather than a second build.
+#
 # Publishing is gated on FLATPAK_GPG_PRIVATE_KEY. Without it the build still
 # runs and uploads artifacts, so a fork of this repo is inert rather than red.
 name: Publish
@@ -54,6 +58,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    outputs:
+      configured: ${{ steps.gate.outputs.configured }}
     steps:
       - uses: actions/checkout@v6
 
@@ -335,6 +341,46 @@ jobs:
           sed -e "s|@BASE@|${base}|g" -e "s|@VERSION@|${VERSION}|g" \
             index.html.in > site/index.html
 
+      # Built from the merged, signed, pruned store rather than from a fresh
+      # build, so the bundle attached to the release is bit-for-bit the commit
+      # the repository serves. Nothing is compiled twice.
+      #
+      # --repo-url and --gpg-keys together are what make a bundle more than a
+      # one-off install: flatpak configures the origin remote from them, so an
+      # app installed from the file afterwards updates from R2 with signature
+      # verification on. One without the other would be worse than neither --
+      # an origin with no key is a remote whose updates can never verify.
+      - name: Build the installable bundles
+        if: steps.gate.outputs.configured == 'true'
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+          R2_PUBLIC_BASE: ${{ vars.R2_PUBLIC_BASE }}
+        run: |
+          set -euo pipefail
+          base="${R2_PUBLIC_BASE%/}"
+          mkdir -p bundles
+          for arch in x86_64 aarch64; do
+            out="bundles/OpenLogi-${VERSION}-${arch}.flatpak"
+            # Extraction from the repository, not execution, so both
+            # architectures are built here on an x86_64 runner.
+            flatpak build-bundle \
+              --arch="$arch" \
+              --repo-url="${base}/repo/" \
+              --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo \
+              --gpg-keys=site/openlogi.gpg \
+              site/repo "$out" "${FLATPAK_ID}" stable
+            echo "  ${out}: $(du -h "$out" | cut -f1)"
+          done
+          ( cd bundles && sha256sum ./*.flatpak > SHA256SUMS && cat SHA256SUMS )
+
+      - uses: actions/upload-artifact@v7
+        if: steps.gate.outputs.configured == 'true'
+        with:
+          name: release-bundles
+          path: bundles
+          retention-days: 7
+          compression-level: 0 # already a compressed OSTree stream
+
       - name: Upload to R2
         if: steps.gate.outputs.configured == 'true'
         env:
@@ -473,3 +519,91 @@ jobs:
           got="$(curl -fsSL "${base}/published-version")"
           [ "$got" = "$VERSION" ] || { echo "::error::published-version is ${got}, expected ${VERSION}" >&2; exit 1; }
           echo "verified ${VERSION} at ${base}"
+
+  # Separate job purely for the permission. The publish job holds the signing
+  # key and the bucket credentials and has no business also holding write
+  # access to this repository's contents.
+  release:
+    name: Release
+    needs: [build, publish]
+    if: needs.publish.outputs.configured == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-bundles
+          path: bundles
+
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+          R2_PUBLIC_BASE: ${{ vars.R2_PUBLIC_BASE }}
+        run: |
+          set -euo pipefail
+          base="${R2_PUBLIC_BASE%/}"
+          ls -lh bundles
+
+          # The tag mirrors upstream exactly. This repository has no version of
+          # its own to number: a release here is one upstream release, packaged.
+          # A tag that drifted from upstream's would make "which OpenLogi is
+          # this" unanswerable from the release page.
+          notes="$(mktemp)"
+          cat > "$notes" <<EOF
+          OpenLogi **${VERSION}**, built unmodified from the upstream release
+          tarball. See [upstream's release notes](https://github.com/${UPSTREAM}/releases/tag/${VERSION})
+          for what changed in the application itself.
+
+          ## Install
+
+          The repository is the better route: it updates itself, and the bundles
+          below do not.
+
+          \`\`\`sh
+          flatpak remote-add --if-not-exists --user openlogi \\
+            ${base}/openlogi.flatpakrepo
+          flatpak install --user openlogi ${FLATPAK_ID}
+          \`\`\`
+
+          For a single file, download the bundle for your architecture and:
+
+          \`\`\`sh
+          flatpak install --user ./OpenLogi-${VERSION}-x86_64.flatpak
+          \`\`\`
+
+          These bundles carry the repository as their origin, so an app
+          installed from one still picks up later releases through
+          \`flatpak update\`.
+
+          **After installing, run the [one-time host setup](https://github.com/${GITHUB_REPOSITORY}#one-time-host-setup).**
+          Without the udev rules on the host, no devices are detected at all.
+
+          ## Verify
+
+          \`\`\`sh
+          sha256sum -c SHA256SUMS
+          \`\`\`
+          EOF
+          # The heredoc body carries this step's indentation, and ten leading
+          # spaces would render every line of the notes as a code block.
+          sed -i 's/^          //' "$notes"
+          echo "::group::release notes"; cat "$notes"; echo "::endgroup::"
+
+          # Re-running a publish for a version that already has a release has to
+          # update it rather than fail. `gh release create` errors on an
+          # existing tag, and deleting the release to recreate it would break
+          # every link to it.
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            echo "release ${VERSION} exists, updating"
+            gh release edit "$VERSION" --notes-file "$notes"
+            gh release upload "$VERSION" bundles/* --clobber
+          else
+            gh release create "$VERSION" bundles/* \
+              --target "${GITHUB_SHA}" \
+              --title "OpenLogi ${VERSION}" \
+              --notes-file "$notes"
+          fi
+          gh release view "$VERSION" --json tagName,assets \
+            --jq '.tagName + ": " + ([.assets[].name] | join(", "))'
