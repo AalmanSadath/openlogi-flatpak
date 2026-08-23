@@ -185,11 +185,33 @@ itself, so a fork stays inert rather than red.
 | Variable | `R2_BUCKET` | bucket name |
 | Variable | `R2_PUBLIC_BASE` | public base URL, no trailing slash, e.g. `https://openlogi.aalman.dev` |
 
+Two more are optional, and only affect the cache purge:
+
+| Kind | Name | Value |
+|---|---|---|
+| Secret | `CLOUDFLARE_API_TOKEN` | token with Zone / Cache Purge / Purge, scoped to this zone |
+| Secret | `CLOUDFLARE_ZONE_ID` | the zone the custom domain lives in |
+
+Without them the publish still succeeds and the purge step says so and exits.
+
 The upload runs in three phases, and the order is load-bearing: content first,
 then the `summary` and `refs` that make it reachable, and only then the deletion
 of what pruning removed. A single `sync` could publish a summary naming objects
 that had not been uploaded yet, which every client in the middle of an update
 would see as a broken repository.
+
+Afterwards the mutable paths are purged from Cloudflare's edge by URL: the two
+forms of the landing page, the descriptors, `config`, every `summary*` and every
+ref file. Never "purge everything" -- that would drop the immutable objects and
+deltas too, and every client mid-update would refetch them from R2 as billed
+reads, which is the exact cost the year-long cache on them exists to avoid.
+
+The purge is insurance rather than a fix today. The cache rule matches
+`/repo/objects/` and `/repo/deltas/` only, so the pointers are not cached at the
+edge to begin with and `cf-cache-status` on them reads `DYNAMIC`. It becomes
+load-bearing the moment that rule widens or Cloudflare's default eligibility
+changes, and a stale `summary` is a repository that looks broken to every
+client.
 
 Signing covers both the summary **and** the individual commits. Clients verify
 the commit they pull, so a summary-only signature fails every install with
