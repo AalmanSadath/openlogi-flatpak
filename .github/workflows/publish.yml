@@ -531,6 +531,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      # For .github/scripts/release-notes.sh, not for the bundles.
+      - uses: actions/checkout@v6
+
       - uses: actions/download-artifact@v8
         with:
           name: release-bundles
@@ -550,46 +553,12 @@ jobs:
           # its own to number: a release here is one upstream release, packaged.
           # A tag that drifted from upstream's would make "which OpenLogi is
           # this" unanswerable from the release page.
-          notes="$(mktemp)"
-          cat > "$notes" <<EOF
-          OpenLogi **${VERSION}**, built unmodified from the upstream release
-          tarball. See [upstream's release notes](https://github.com/${UPSTREAM}/releases/tag/${VERSION})
-          for what changed in the application itself.
-
-          ## Install
-
-          The repository is the better route: it updates itself, and the bundles
-          below do not.
-
-          \`\`\`sh
-          flatpak remote-add --if-not-exists --user openlogi \\
-            ${base}/openlogi.flatpakrepo
-          flatpak install --user openlogi ${FLATPAK_ID}
-          \`\`\`
-
-          For a single file, download the bundle for your architecture and:
-
-          \`\`\`sh
-          flatpak install --user ./OpenLogi-${VERSION}-x86_64.flatpak
-          \`\`\`
-
-          These bundles carry the repository as their origin, so an app
-          installed from one still picks up later releases through
-          \`flatpak update\`.
-
-          **After installing, run the [one-time host setup](https://github.com/${GITHUB_REPOSITORY}#one-time-host-setup).**
-          Without the udev rules on the host, no devices are detected at all.
-
-          ## Verify
-
-          \`\`\`sh
-          sha256sum -c SHA256SUMS
-          \`\`\`
-          EOF
-          # The heredoc body carries this step's indentation, and ten leading
-          # spaces would render every line of the notes as a code block.
-          sed -i 's/^          //' "$notes"
-          echo "::group::release notes"; cat "$notes"; echo "::endgroup::"
+          #
+          # The notes live in a script because backfill-releases.yml writes the
+          # same ones, and a release that read differently depending on which
+          # workflow made it would be a small lie about what it is.
+          .github/scripts/release-notes.sh "$VERSION" "$base" > notes.md
+          echo "::group::release notes"; cat notes.md; echo "::endgroup::"
 
           # Re-running a publish for a version that already has a release has to
           # update it rather than fail. `gh release create` errors on an
@@ -597,13 +566,13 @@ jobs:
           # every link to it.
           if gh release view "$VERSION" >/dev/null 2>&1; then
             echo "release ${VERSION} exists, updating"
-            gh release edit "$VERSION" --notes-file "$notes"
+            gh release edit "$VERSION" --notes-file notes.md
             gh release upload "$VERSION" bundles/* --clobber
           else
             gh release create "$VERSION" bundles/* \
               --target "${GITHUB_SHA}" \
               --title "OpenLogi ${VERSION}" \
-              --notes-file "$notes"
+              --notes-file notes.md
           fi
           gh release view "$VERSION" --json tagName,assets \
             --jq '.tagName + ": " + ([.assets[].name] | join(", "))'
