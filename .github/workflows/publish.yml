@@ -196,19 +196,23 @@ jobs:
 
       - name: Install flatpak and rclone
         if: steps.gate.outputs.configured == 'true'
-        env:
-          RCLONE_VERSION: v1.75.0
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y flatpak ostree
+          # A shell variable, deliberately not an environment one. rclone maps
+          # every RCLONE_* variable in the environment onto the flag of the
+          # same name, so RCLONE_VERSION is read as --version, which is a
+          # boolean, and every rclone invocation in the job dies on
+          # `strconv.ParseBool` before it does anything.
+          version=v1.75.0
           # Pinned rather than apt's. The runner image moves under us, and an
           # rclone whose defaults changed is indistinguishable from a workflow
           # bug when the bucket starts rejecting uploads.
           curl -fsSL -o /tmp/rclone.zip \
-            "https://downloads.rclone.org/${RCLONE_VERSION}/rclone-${RCLONE_VERSION}-linux-amd64.zip"
+            "https://downloads.rclone.org/${version}/rclone-${version}-linux-amd64.zip"
           unzip -q /tmp/rclone.zip -d /tmp
-          sudo install -m755 "/tmp/rclone-${RCLONE_VERSION}-linux-amd64/rclone" /usr/local/bin/rclone
+          sudo install -m755 "/tmp/rclone-${version}-linux-amd64/rclone" /usr/local/bin/rclone
           rclone version
 
       - uses: actions/download-artifact@v8
