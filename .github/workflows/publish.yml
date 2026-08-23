@@ -1,5 +1,5 @@
 # Build OpenLogi from an upstream release tarball and publish both
-# architectures as a signed OSTree repository on GitHub Pages.
+# architectures as a signed OSTree repository on Cloudflare R2.
 #
 # Upstream ships .deb/.rpm/.pkg.tar.zst with no repository behind them, and its
 # in-app updater publishes no Linux artifact, so nothing on Linux can upgrade
