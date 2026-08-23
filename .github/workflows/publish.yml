@@ -213,6 +213,21 @@ jobs:
       - name: Merge both architectures into one signed repository
         if: steps.gpg.outputs.configured == 'true'
         run: |
+          # Fail loudly. A failure inside `$( )` in a for-list does not trip
+          # `set -e`, which is how an empty store once published green: the ref
+          # loop silently iterated nothing. nullglob turns a non-matching glob
+          # into no iterations rather than one iteration over the literal.
+          set -euo pipefail
+          shopt -s nullglob
+
+          echo "::group::artifacts as downloaded"
+          ls -la arch-repos || echo "arch-repos missing"
+          for repo in arch-repos/*; do
+            echo "--- $repo"
+            ostree --repo="$repo" refs || echo "  not an ostree repo"
+          done
+          echo "::endgroup::"
+
           # Seeded from what is already published, then bounded by
           # --prune-depth below. A release is ~64 MB across both arches, so a
           # three-deep store sits near 190 MB against the 1 GB Pages cap, and
@@ -250,16 +265,29 @@ jobs:
           # client verifies the commit it pulls. Without a signature here every
           # install fails with "GPG verification enabled, but no signatures
           # found".
+          committed=0
           for repo in arch-repos/flatpak-repo-*; do
-            for ref in $(ostree --repo="$repo" refs); do
+            refs="$(ostree --repo="$repo" refs)"
+            if [ -z "$refs" ]; then
+              echo "::error::$repo lists no refs" >&2
+              exit 1
+            fi
+            while read -r ref; do
+              [ -n "$ref" ] || continue
               echo "committing $ref from $(basename "$repo")"
               flatpak build-commit-from \
                 --src-repo="$repo" --src-ref="$ref" \
                 --gpg-sign="${GPG_FINGERPRINT}" --gpg-homedir="${GNUPGHOME}" \
                 --no-update-summary \
                 site/repo "$ref"
-            done
+              committed=$((committed + 1))
+            done <<< "$refs"
           done
+          if [ "$committed" -eq 0 ]; then
+            echo "::error::no refs were committed; refusing to publish an empty repository" >&2
+            exit 1
+          fi
+          echo "committed ${committed} ref(s)"
 
           # Deltas are worth generating now that a parent exists: an update
           # from the previous release ships the changed objects rather than a
@@ -271,6 +299,16 @@ jobs:
             --generate-static-deltas \
             --prune --prune-depth=2 \
             site/repo
+          # A summary without the app refs is the failure that shipped before:
+          # every step green, every client seeing an empty remote. Refuse to
+          # hand that to deploy-pages, which would overwrite a working site.
+          published_refs="$(ostree --repo=site/repo refs | grep -c "^app/" || true)"
+          if [ "$published_refs" -eq 0 ]; then
+            echo "::error::site/repo has no app refs after update; refusing to deploy" >&2
+            exit 1
+          fi
+          echo "app refs in the store: ${published_refs}"
+
           ostree --repo=site/repo refs
           # History depth per ref, so a run makes it obvious whether parents
           # are accumulating or every build is still landing parentless.
