@@ -21,7 +21,7 @@ Software and KDE Discover in the background) keeps it current.
 
 ```sh
 flatpak remote-add --if-not-exists --user openlogi \
-  https://pub-6ed3b1ed2aca4c86bee37540a77a81ec.r2.dev/openlogi.flatpakrepo
+  https://openlogi.aalman.dev/openlogi.flatpakrepo
 flatpak install --user openlogi org.openlogi.OpenLogi
 ```
 
@@ -139,9 +139,10 @@ case, every update a full pull with no delta applied. Storage at depth 8 is
 around 0.6 GB of a 10 GB tier. Egress, the thing that ended the Pages
 arrangement, is 1.87 TB and free.
 
-So a Cloudflare custom domain in front of the bucket is not a cost measure. It is
-worth doing for the rate limit: the `r2.dev` development URL is throttled and
-Cloudflare says plainly not to use it in production.
+So the Cloudflare custom domain in front of the bucket is not a cost measure. It
+is there for the rate limit: the `r2.dev` development URL is throttled and
+Cloudflare says plainly not to use it in production. This repo publishes to
+`openlogi.aalman.dev`.
 
 ### Configuration
 
@@ -155,7 +156,7 @@ itself, so a fork stays inert rather than red.
 | Secret | `R2_ACCESS_KEY_ID` | R2 API token, Object Read & Write, scoped to this bucket |
 | Secret | `R2_SECRET_ACCESS_KEY` | the token's secret |
 | Variable | `R2_BUCKET` | bucket name |
-| Variable | `R2_PUBLIC_BASE` | public base URL, no trailing slash, e.g. `https://pub-xxxx.r2.dev` |
+| Variable | `R2_PUBLIC_BASE` | public base URL, no trailing slash, e.g. `https://openlogi.aalman.dev` |
 
 The upload runs in three phases, and the order is load-bearing: content first,
 then the `summary` and `refs` that make it reachable, and only then the deletion
