@@ -319,11 +319,16 @@ jobs:
           # from the previous release ships the changed objects rather than a
           # full ~33 MB copy, which matters more for the 100 GB/month Pages
           # bandwidth allowance than the objects themselves do for the 1 GB
-          # size cap. --prune-depth=2 keeps the current commit plus two.
+          # size cap. --prune-depth=7 keeps the current commit plus seven, so a
+          # release that breaks something has several places to roll back to.
+          # Depth buys rollback range rather than delta coverage: deltas are
+          # generated between consecutive commits, so a client skipping
+          # releases still falls back to a full download however deep the
+          # store is.
           flatpak build-update-repo \
             --gpg-sign="${GPG_FINGERPRINT}" \
             --generate-static-deltas \
-            --prune --prune-depth=2 \
+            --prune --prune-depth=7 \
             site/repo
           # A summary without the app refs is the failure that shipped before:
           # every step green, every client seeing an empty remote. Refuse to
@@ -344,6 +349,18 @@ jobs:
           done
           du -sh site/repo
           du -sh site/repo/deltas 2>/dev/null || echo "no deltas generated"
+
+          # GitHub Pages is documented as a 1 GB soft cap. Retention is bounded
+          # by --prune-depth, but per-release growth is not: a heavier build,
+          # or a third architecture, moves it. Report the headroom every run so
+          # the depth is a measured choice rather than a standing assumption.
+          # Deliberately a warning, not a failure — refusing to publish would
+          # trade a working repository for a tidy one.
+          size_mb="$(du -sm site/repo | cut -f1)"
+          echo "store: ${size_mb} MB of a 1024 MB soft cap"
+          if [ "$size_mb" -gt 700 ]; then
+            echo "::warning::the published store is ${size_mb} MB; consider lowering --prune-depth" >&2
+          fi
 
       - uses: actions/configure-pages@v5
         if: steps.gpg.outputs.configured == 'true'
