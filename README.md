@@ -148,12 +148,6 @@ upstream release, packaged. Its bundles come out of the merged and signed store
 rather than a second build, so the file on the release page is the same commit
 the repository serves.
 
-`.github/workflows/backfill-releases.yml` covers the versions published before
-releases existed. It reads the retained history straight out of the repository,
-finds the commit carrying each version, and bundles that, so nothing is rebuilt
-and no extra commit lands on any ref. It also needs no secrets. Once the backlog
-has releases it has nothing left to do.
-
 ### Why R2 rather than GitHub Pages
 
 Upstream releases roughly seventeen times a month. Once Flatpak is the

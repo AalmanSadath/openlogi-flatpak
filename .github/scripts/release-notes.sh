@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 # Print the GitHub release notes for one upstream version, to stdout.
 #
-# Two workflows create releases here -- publish.yml as part of a normal
-# publish, and backfill-releases.yml for versions that were published to the
-# repository before releases existed -- and a release that reads differently
-# depending on which one made it would be a small lie about what it is. One
-# definition, both callers.
+# Kept out of the workflow so the notes are editable without touching CI, and
+# so a release reads the same however it was made. A backfill workflow shared
+# this for the versions published before releases existed; it has been removed
+# now that the backlog is filled, but the split is worth keeping.
 #
 #   release-notes.sh VERSION BASE_URL [EXTRA_NOTE]
 #

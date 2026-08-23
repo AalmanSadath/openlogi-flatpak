@@ -554,11 +554,28 @@ jobs:
           # A tag that drifted from upstream's would make "which OpenLogi is
           # this" unanswerable from the release page.
           #
-          # The notes live in a script because backfill-releases.yml writes the
-          # same ones, and a release that read differently depending on which
-          # workflow made it would be a small lie about what it is.
+          # The notes live in a script so they can be edited without touching
+          # CI, and so every release reads the same however it was made.
           .github/scripts/release-notes.sh "$VERSION" "$base" > notes.md
           echo "::group::release notes"; cat notes.md; echo "::endgroup::"
+
+          # A manual dispatch can publish an older tag, and that must not move
+          # the "Latest" badge backwards. gh decides this automatically from
+          # date and version when left alone, which is usually right; deciding
+          # it here against every existing release makes it right regardless of
+          # what gh's default does next release.
+          #
+          # -V, not a plain sort: v0.7.10 is above v0.7.7 as versions and below
+          # it as strings.
+          newest="$( { echo "$VERSION"; gh release list --limit 200 \
+            --json tagName --jq '.[].tagName'; } | grep . | sort -V | tail -1)"
+          latest=false
+          [ "$newest" = "$VERSION" ] && latest=true
+          echo "latest release after this: ${newest} (this one: ${latest})"
+          # `--latest=false` is documented for create but not for edit, so the
+          # edit path passes the flag only to set the badge, never to clear it.
+          mark=()
+          [ "$latest" = true ] && mark=(--latest)
 
           # Re-running a publish for a version that already has a release has to
           # update it rather than fail. `gh release create` errors on an
@@ -566,13 +583,14 @@ jobs:
           # every link to it.
           if gh release view "$VERSION" >/dev/null 2>&1; then
             echo "release ${VERSION} exists, updating"
-            gh release edit "$VERSION" --notes-file notes.md
+            gh release edit "$VERSION" --notes-file notes.md "${mark[@]}"
             gh release upload "$VERSION" bundles/* --clobber
           else
             gh release create "$VERSION" bundles/* \
               --target "${GITHUB_SHA}" \
               --title "OpenLogi ${VERSION}" \
-              --notes-file notes.md
+              --notes-file notes.md \
+              --latest="$latest"
           fi
           gh release view "$VERSION" --json tagName,assets \
             --jq '.tagName + ": " + ([.assets[].name] | join(", "))'
