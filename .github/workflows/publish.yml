@@ -196,9 +196,20 @@ jobs:
 
       - name: Install flatpak and rclone
         if: steps.gate.outputs.configured == 'true'
+        env:
+          RCLONE_VERSION: v1.75.0
         run: |
+          set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y flatpak ostree rclone
+          sudo apt-get install -y flatpak ostree
+          # Pinned rather than apt's. The runner image moves under us, and an
+          # rclone whose defaults changed is indistinguishable from a workflow
+          # bug when the bucket starts rejecting uploads.
+          curl -fsSL -o /tmp/rclone.zip \
+            "https://downloads.rclone.org/${RCLONE_VERSION}/rclone-${RCLONE_VERSION}-linux-amd64.zip"
+          unzip -q /tmp/rclone.zip -d /tmp
+          sudo install -m755 "/tmp/rclone-${RCLONE_VERSION}-linux-amd64/rclone" /usr/local/bin/rclone
+          rclone version
 
       - uses: actions/download-artifact@v8
         if: steps.gate.outputs.configured == 'true'
@@ -440,6 +451,12 @@ jobs:
           RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           RCLONE_CONFIG_R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
           RCLONE_CONFIG_R2_NO_CHECK_BUCKET: 'true'
+          # R2 does not implement ACLs, and an unsupported x-amz-acl is
+          # answered with `501 NotImplemented: Not Implemented` on every
+          # upload. Cloudflare's own rclone configuration sets this
+          # explicitly rather than leaving it to whatever the client defaults
+          # to that week.
+          RCLONE_CONFIG_R2_ACL: private
           BUCKET: ${{ vars.R2_BUCKET }}
           R2_PUBLIC_BASE: ${{ vars.R2_PUBLIC_BASE }}
         run: |
@@ -470,54 +487,63 @@ jobs:
             exit 1
           fi
 
+          # Transport only. Every filter lives with the phase that needs it:
+          # rclone warns that mixing --include and --exclude leaves the parse
+          # order indeterminate, so which files a phase touches becomes a
+          # guess. --filter rules are first-match in the order given.
           common=(--transfers=32 --checkers=32 --fast-list --retries=3
-                  --stats-one-line --exclude "/tmp/**" --exclude "/state/**")
+                  --stats-one-line)
+
           # Objects are content-addressed and never rewritten, so they can be
-          # cached forever. This costs nothing today on the rate-limited r2.dev
-          # URL, and is what makes a CDN in front of the bucket worth having
-          # later: a cache hit never becomes a billed Class B operation.
+          # cached forever. A cache hit at the edge never becomes a billed
+          # Class B operation, which is what makes a CDN in front of the
+          # bucket worth having.
           immutable=(--header-upload "Cache-Control: public, max-age=31536000, immutable")
           # summary and refs are the pointers that change every release.
           mutable=(--header-upload "Cache-Control: public, max-age=60")
+
+          # Objects are content-addressed: the name is a hash of the content,
+          # so a matching name means matching bytes and there is nothing to
+          # compare beyond existence. --size-only says exactly that. Without
+          # it rclone compares modification times, and against S3 with
+          # --fast-list it reads those from the bucket listing rather than
+          # from the mtime it stores as metadata, decides every object
+          # differs, and re-uploads the entire store every run.
+          content=(--size-only
+                   --filter "- /tmp/**" --filter "- /state/**"
+                   --filter "- /summary*" --filter "- /refs/**"
+                   --filter "- /config"
+                   --filter "+ **")
+          # Everything the content phase deliberately skips.
+          pointers=(--filter "+ /summary*" --filter "+ /refs/**"
+                    --filter "+ /config" --filter "- **")
 
           # Order matters, and it is the whole reason this is three commands
           # rather than one sync. A client that reads a new summary naming
           # objects that have not been uploaded yet gets a broken pull, so
           # content goes up first, the pointers that make it reachable second,
           # and only then is anything deleted.
-          # Objects are content-addressed: the name is a hash of the content,
-          # so a matching name means matching bytes and there is nothing to
-          # compare beyond existence. --size-only says exactly that. Without
-          # it rclone compares modification times, and against S3 with
-          # --fast-list it reads those from the bucket listing rather than
-          # from the mtime it stores as metadata, decides every object differs,
-          # and re-uploads the entire store every run.
-          content=(--size-only --exclude "/summary*" --exclude "/refs/**"
-                   --exclude "/config")
-
           echo "::group::content"
           rclone copy site/repo "r2:${BUCKET}/repo" "${common[@]}" "${immutable[@]}" \
             "${content[@]}"
           echo "::endgroup::"
 
           # No --size-only here. These few files change content every release
-          # and can land on the same size, so they are compared properly, and
-          # --ignore-times uploads them whether or not rclone thinks they
-          # differ. Six small files; correctness is worth more than the skip.
+          # and can land on the same size, so --ignore-times uploads them
+          # whether or not rclone thinks they differ. Six small files;
+          # correctness is worth more than the skip.
           echo "::group::pointers"
           rclone copy site/repo "r2:${BUCKET}/repo" "${common[@]}" "${mutable[@]}" \
-            --ignore-times \
-            --include "/summary*" --include "/refs/**" --include "/config"
+            --ignore-times "${pointers[@]}"
           echo "::endgroup::"
 
           # Deletion pass. It carries the same header and the same filters as
           # the content phase for one reason: sync uploads as well as deletes,
           # and an upload here without --header-upload silently strips the
-          # Cache-Control off whatever it touches. That is how objects ended up
-          # in the bucket with no cache header at all, which a CDN in front
-          # would then serve on its own default TTL rather than the year the
-          # object deserves. Excluding the pointers leaves them exactly as the
-          # phase above wrote them; they are fixed names and never orphaned.
+          # Cache-Control off whatever it touches. That is how objects ended
+          # up in the bucket with no cache header at all. Excluding the
+          # pointers leaves them exactly as the phase above wrote them; they
+          # are fixed names and never orphaned.
           echo "::group::prune"
           rclone sync site/repo "r2:${BUCKET}/repo" "${common[@]}" "${immutable[@]}" \
             "${content[@]}" --delete-after
@@ -526,10 +552,11 @@ jobs:
           # Descriptors last, and published-version last of all: a scheduled
           # run reads it to decide whether this version is already out.
           rclone copy site "r2:${BUCKET}" "${common[@]}" "${mutable[@]}" \
-            --include "/openlogi.gpg" --include "/openlogi.flatpakrepo" \
-            --include "/*.flatpakref" --include "/index.html"
+            --filter "+ /openlogi.gpg" --filter "+ /openlogi.flatpakrepo" \
+            --filter "+ /*.flatpakref" --filter "+ /index.html" \
+            --filter "- **"
           rclone copy site "r2:${BUCKET}" "${common[@]}" "${mutable[@]}" \
-            --include "/published-version"
+            --filter "+ /published-version" --filter "- **"
 
           echo "published to ${R2_PUBLIC_BASE:-the bucket}"
 
