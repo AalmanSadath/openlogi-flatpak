@@ -485,18 +485,42 @@ jobs:
           # objects that have not been uploaded yet gets a broken pull, so
           # content goes up first, the pointers that make it reachable second,
           # and only then is anything deleted.
+          # Objects are content-addressed: the name is a hash of the content,
+          # so a matching name means matching bytes and there is nothing to
+          # compare beyond existence. --size-only says exactly that. Without
+          # it rclone compares modification times, and against S3 with
+          # --fast-list it reads those from the bucket listing rather than
+          # from the mtime it stores as metadata, decides every object differs,
+          # and re-uploads the entire store every run.
+          content=(--size-only --exclude "/summary*" --exclude "/refs/**"
+                   --exclude "/config")
+
           echo "::group::content"
           rclone copy site/repo "r2:${BUCKET}/repo" "${common[@]}" "${immutable[@]}" \
-            --exclude "/summary*" --exclude "/refs/**" --exclude "/config"
+            "${content[@]}"
           echo "::endgroup::"
 
+          # No --size-only here. These few files change content every release
+          # and can land on the same size, so they are compared properly, and
+          # --ignore-times uploads them whether or not rclone thinks they
+          # differ. Six small files; correctness is worth more than the skip.
           echo "::group::pointers"
           rclone copy site/repo "r2:${BUCKET}/repo" "${common[@]}" "${mutable[@]}" \
+            --ignore-times \
             --include "/summary*" --include "/refs/**" --include "/config"
           echo "::endgroup::"
 
+          # Deletion pass. It carries the same header and the same filters as
+          # the content phase for one reason: sync uploads as well as deletes,
+          # and an upload here without --header-upload silently strips the
+          # Cache-Control off whatever it touches. That is how objects ended up
+          # in the bucket with no cache header at all, which a CDN in front
+          # would then serve on its own default TTL rather than the year the
+          # object deserves. Excluding the pointers leaves them exactly as the
+          # phase above wrote them; they are fixed names and never orphaned.
           echo "::group::prune"
-          rclone sync site/repo "r2:${BUCKET}/repo" "${common[@]}" --delete-after
+          rclone sync site/repo "r2:${BUCKET}/repo" "${common[@]}" "${immutable[@]}" \
+            "${content[@]}" --delete-after
           echo "::endgroup::"
 
           # Descriptors last, and published-version last of all: a scheduled
