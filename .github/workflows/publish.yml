@@ -260,8 +260,19 @@ jobs:
             # public key imported purely to read our own history back.
             ostree --repo=site/repo remote add --no-gpg-verify \
               --if-not-exists published "${published_repo}"
-            ostree --repo=site/repo pull --mirror published \
-              || echo "could not seed from the published repo; continuing without history"
+            # How many refs the remote advertises, before pulling anything.
+            remote_refs="$(ostree --repo=site/repo remote refs published | wc -l)"
+            echo "published repository advertises ${remote_refs} ref(s)"
+            # No `|| echo` here. Swallowing this is what left the store with no
+            # parent to commit onto, so every build landed parentless and the
+            # history this exists to keep never formed.
+            ostree --repo=site/repo pull --mirror published
+            seeded="$(ostree --repo=site/repo refs | wc -l)"
+            echo "seeded ${seeded} ref(s)"
+            if [ "$remote_refs" -gt 0 ] && [ "$seeded" -eq 0 ]; then
+              echo "::error::the published repository advertises ${remote_refs} refs but none were seeded" >&2
+              exit 1
+            fi
           else
             echo "no published repository yet; starting a fresh store"
           fi
@@ -294,6 +305,8 @@ jobs:
                 --no-update-summary \
                 site/repo "$ref"
               committed=$((committed + 1))
+              parent="$(ostree --repo=site/repo log "$ref" | grep -c '^commit ')"
+              echo "  ${ref} now ${parent} commit(s) deep"
             done <<< "$refs"
           done
           if [ "$committed" -eq 0 ]; then
