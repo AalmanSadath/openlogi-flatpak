@@ -51,6 +51,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REQUESTED: ${{ inputs.version }}
+          R2_PUBLIC_BASE: ${{ vars.R2_PUBLIC_BASE }}
         run: |
           set -euo pipefail
           if [ -n "${REQUESTED}" ]; then
@@ -67,8 +68,8 @@ jobs:
           # Skip a scheduled run that would rebuild what is already published.
           # A manual dispatch always proceeds, so a failed publish can be redone.
           published=""
-          if [ "${{ github.event_name }}" = "schedule" ]; then
-            published="$(curl -fsSL "https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}/published-version" 2>/dev/null || true)"
+          if [ "${{ github.event_name }}" = "schedule" ] && [ -n "${R2_PUBLIC_BASE}" ]; then
+            published="$(curl -fsSL "${R2_PUBLIC_BASE%/}/published-version" 2>/dev/null || true)"
           fi
           if [ "$published" = "$version" ]; then
             echo "already published ${version}, nothing to do"
@@ -159,47 +160,54 @@ jobs:
           compression-level: 0 # OSTree objects are already compressed
 
   publish:
-    name: Publish to GitHub Pages
+    name: Publish to R2
     needs: [resolve, build]
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - uses: actions/checkout@v6
 
-      - name: Check for the signing key
-        id: gpg
+      - name: Check for the signing key and the bucket credentials
+        id: gate
         env:
           KEY: ${{ secrets.FLATPAK_GPG_PRIVATE_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+          R2_PUBLIC_BASE: ${{ vars.R2_PUBLIC_BASE }}
         run: |
-          if [ -z "$KEY" ]; then
-            echo "FLATPAK_GPG_PRIVATE_KEY is not configured, skipping publish." >&2
-            echo "An unsigned repository would force every user to add the" >&2
-            echo "remote with --no-gpg-verify, so this stops instead." >&2
+          missing=""
+          [ -n "$KEY" ] || missing="${missing} FLATPAK_GPG_PRIVATE_KEY"
+          [ -n "$R2_ACCOUNT_ID" ] || missing="${missing} R2_ACCOUNT_ID"
+          [ -n "$R2_ACCESS_KEY_ID" ] || missing="${missing} R2_ACCESS_KEY_ID"
+          [ -n "$R2_SECRET_ACCESS_KEY" ] || missing="${missing} R2_SECRET_ACCESS_KEY"
+          [ -n "$R2_BUCKET" ] || missing="${missing} R2_BUCKET"
+          [ -n "$R2_PUBLIC_BASE" ] || missing="${missing} R2_PUBLIC_BASE"
+          if [ -n "$missing" ]; then
+            echo "not configured, skipping publish:${missing}" >&2
+            echo "A fork without these is inert rather than red: the build still" >&2
+            echo "runs and uploads artifacts, it just publishes nowhere." >&2
             echo "configured=false" >> "$GITHUB_OUTPUT"
           else
             echo "configured=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Install flatpak
-        if: steps.gpg.outputs.configured == 'true'
+      - name: Install flatpak and rclone
+        if: steps.gate.outputs.configured == 'true'
         run: |
           sudo apt-get update
-          sudo apt-get install -y flatpak ostree
+          sudo apt-get install -y flatpak ostree rclone
 
       - uses: actions/download-artifact@v8
-        if: steps.gpg.outputs.configured == 'true'
+        if: steps.gate.outputs.configured == 'true'
         with:
           pattern: flatpak-repo-*
           path: arch-repos
 
       - name: Import the signing key
-        if: steps.gpg.outputs.configured == 'true'
+        if: steps.gate.outputs.configured == 'true'
         env:
           KEY: ${{ secrets.FLATPAK_GPG_PRIVATE_KEY }}
         run: |
@@ -211,7 +219,9 @@ jobs:
             | awk -F: '/^fpr:/ {print "GPG_FINGERPRINT=" $10; exit}' >> "$GITHUB_ENV"
 
       - name: Merge both architectures into one signed repository
-        if: steps.gpg.outputs.configured == 'true'
+        if: steps.gate.outputs.configured == 'true'
+        env:
+          R2_PUBLIC_BASE: ${{ vars.R2_PUBLIC_BASE }}
         run: |
           # Fail loudly. A failure inside `$( )` in a for-list does not trip
           # `set -e`, which is how an empty store once published green: the ref
@@ -242,17 +252,21 @@ jobs:
           echo "::endgroup::"
 
           # Seeded from what is already published, then bounded by
-          # --prune-depth below. A release is ~64 MB across both arches, so a
-          # six-deep store sits near 390 MB against the 1 GB Pages cap, and
-          # keeping parents buys two things a from-scratch rebuild cannot:
-          # clients can roll back to a previous commit, and static deltas have
-          # something to delta against instead of every update being a full
-          # download.
+          # --prune-depth below. Keeping parents buys two things a from-scratch
+          # rebuild cannot: clients can roll back to a previous commit, and
+          # static deltas have something to delta against instead of every
+          # update being a full download.
+          #
+          # The seed is a full download of the retained store on every run.
+          # That was the reason to keep the depth modest on GitHub Pages, where
+          # it came out of a 100 GB/month allowance. R2 charges nothing for
+          # egress, so the depth is now bounded by storage (~64 MB per release
+          # across both arches) rather than by transfer.
           # ostree init does not create parents.
           mkdir -p site/repo
           ostree --repo=site/repo init --mode=archive-z2
 
-          published_repo="https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}/repo/"
+          published_repo="${R2_PUBLIC_BASE%/}/repo/"
           if curl -fsSL -o /dev/null "${published_repo}config"; then
             echo "seeding from ${published_repo}"
             # --no-gpg-verify: these commits were signed by this workflow on the
@@ -271,11 +285,10 @@ jobs:
             # no parents": the seed takes each ref's head commit and nothing
             # behind it, so the store rebuilt every run held the previous
             # release plus the new one and never more, whatever --prune-depth
-            # said. The site is republished wholesale, so every commit that is
-            # meant to stay reachable has to be pulled back down first. Kept in
-            # step with --prune-depth below: N parents plus the head is N+1
-            # commits, and the new commit on top is pruned back to N+1 again.
-            ostree --repo=site/repo pull --mirror --depth=5 published
+            # said. Kept in step with --prune-depth below: N parents plus the
+            # head is N+1 commits, and the new commit on top is pruned back to
+            # N+1 again.
+            ostree --repo=site/repo pull --mirror --depth=8 published
             seeded="$(ostree --repo=site/repo refs | wc -l)"
             echo "seeded ${seeded} ref(s)"
             # Ref count alone cannot see the failure this guard was written
@@ -294,7 +307,7 @@ jobs:
             echo "no published repository yet; starting a fresh store"
           fi
           # `ostree pull --mirror` would overwrite each ref with the build
-          # job's commit, which has no parent — the seeded history would become
+          # job's commit, which has no parent - the seeded history would become
           # unreachable and be pruned, leaving --prune-depth nothing to keep.
           # build-commit-from instead lands the same content as a new commit on
           # top of whatever the ref already points at, which is what makes the
@@ -332,27 +345,28 @@ jobs:
           fi
           echo "committed ${committed} ref(s)"
 
-          # Deltas are worth generating now that a parent exists: an update
-          # from the previous release ships the changed objects rather than a
-          # full ~33 MB copy, which matters more for the 100 GB/month Pages
-          # bandwidth allowance than the objects themselves do for the 1 GB
-          # size cap. --prune-depth=5 keeps the current commit plus five, so a
-          # release that breaks something has several places to roll back to.
-          # Depth buys rollback range rather than delta coverage: deltas are
-          # generated between consecutive commits, so a client skipping
-          # releases still falls back to a full download however deep the
-          # store is.
+          # Deltas matter more on R2 than they did on Pages, and for a
+          # different reason. Bytes are free here; requests are not. A full
+          # pull of an archive-z2 store fetches every object as its own
+          # request, a few thousand of them, while an update that can use a
+          # delta fetches a handful. --prune-depth=8 keeps the current commit
+          # plus eight, so a release that breaks something has several places
+          # to roll back to. Depth buys rollback range rather than delta
+          # coverage: deltas are generated between consecutive commits, so a
+          # client skipping releases still falls back to a full download
+          # however deep the store is.
           flatpak build-update-repo \
             --gpg-sign="${GPG_FINGERPRINT}" \
             --generate-static-deltas \
-            --prune --prune-depth=5 \
+            --prune --prune-depth=8 \
             site/repo
           # A summary without the app refs is the failure that shipped before:
           # every step green, every client seeing an empty remote. Refuse to
-          # hand that to deploy-pages, which would overwrite a working site.
+          # hand that to the upload, which deletes whatever the local store
+          # does not have.
           published_refs="$(ostree --repo=site/repo refs | grep -c "^app/" || true)"
           if [ "$published_refs" -eq 0 ]; then
-            echo "::error::site/repo has no app refs after update; refusing to deploy" >&2
+            echo "::error::site/repo has no app refs after update; refusing to publish" >&2
             exit 1
           fi
           echo "app refs in the store: ${published_refs}"
@@ -360,41 +374,29 @@ jobs:
           ostree --repo=site/repo refs
           # History depth per ref, so a run makes it obvious whether parents
           # are accumulating or every build is still landing parentless.
-          for ref in $(ostree --repo=site/repo refs); do
-            depth="$(ostree --repo=site/repo log "$ref" | grep -c '^commit ')"
-            echo "${ref}: ${depth} commit(s) retained"
-          done
+          refs_now="$(ostree --repo=site/repo refs)"
+          while read -r ref; do
+            [ -n "$ref" ] || continue
+            echo "${ref}: $(ostree --repo=site/repo log "$ref" | grep -c '^commit ') commit(s) retained"
+          done <<< "$refs_now"
           du -sh site/repo
           du -sh site/repo/deltas 2>/dev/null || echo "no deltas generated"
-
-          # GitHub Pages is documented as a 1 GB soft cap. Retention is bounded
-          # by --prune-depth, but per-release growth is not: a heavier build,
-          # or a third architecture, moves it. Report the headroom every run so
-          # the depth is a measured choice rather than a standing assumption.
-          # Deliberately a warning, not a failure — refusing to publish would
-          # trade a working repository for a tidy one.
-          size_mb="$(du -sm site/repo | cut -f1)"
-          echo "store: ${size_mb} MB of a 1024 MB soft cap"
-          if [ "$size_mb" -gt 700 ]; then
-            echo "::warning::the published store is ${size_mb} MB; consider lowering --prune-depth" >&2
-          fi
-
-      - uses: actions/configure-pages@v5
-        if: steps.gpg.outputs.configured == 'true'
-        id: pages_base
+          echo "store: $(du -sm site/repo | cut -f1) MB"
 
       - name: Write the remote descriptors
-        if: steps.gpg.outputs.configured == 'true'
+        if: steps.gate.outputs.configured == 'true'
         env:
           VERSION: ${{ needs.resolve.outputs.version }}
+          R2_PUBLIC_BASE: ${{ vars.R2_PUBLIC_BASE }}
         run: |
           set -euo pipefail
-          base="${{ steps.pages_base.outputs.base_url }}"
-          base="${base:-https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}}"
+          base="${R2_PUBLIC_BASE%/}"
           gpg --export "${GPG_FINGERPRINT}" > site/openlogi.gpg
           key_b64="$(base64 -w0 < site/openlogi.gpg)"
 
           # Read back by scheduled runs to skip rebuilding what is already out.
+          # Uploaded last, after the store is live, so a run that dies midway
+          # does not convince the next one there is nothing to do.
           printf '%s' "${VERSION}" > site/published-version
 
           cat > site/openlogi.flatpakrepo <<EOF
@@ -421,11 +423,87 @@ jobs:
           sed -e "s|@BASE@|${base}|g" -e "s|@VERSION@|${VERSION}|g" \
             index.html.in > site/index.html
 
-      - uses: actions/upload-pages-artifact@v4
-        if: steps.gpg.outputs.configured == 'true'
-        with:
-          path: site
+      - name: Upload to R2
+        if: steps.gate.outputs.configured == 'true'
+        env:
+          RCLONE_CONFIG_R2_TYPE: s3
+          RCLONE_CONFIG_R2_PROVIDER: Cloudflare
+          RCLONE_CONFIG_R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          RCLONE_CONFIG_R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          RCLONE_CONFIG_R2_NO_CHECK_BUCKET: 'true'
+          BUCKET: ${{ vars.R2_BUCKET }}
+          R2_PUBLIC_BASE: ${{ vars.R2_PUBLIC_BASE }}
+        run: |
+          set -euo pipefail
 
-      - uses: actions/deploy-pages@v4
-        if: steps.gpg.outputs.configured == 'true'
-        id: deploy
+          # The last phase deletes whatever the bucket has and the local store
+          # does not. A local store that came out wrong would therefore empty
+          # the remote rather than fail, so check it is plausibly a repository
+          # before anything is allowed to delete.
+          objects="$(find site/repo/objects -type f | wc -l)"
+          echo "local store holds ${objects} objects"
+          if [ "$objects" -lt 100 ]; then
+            echo "::error::only ${objects} objects locally; refusing to sync a store this small" >&2
+            exit 1
+          fi
+
+          common=(--transfers=32 --checkers=32 --fast-list --retries=3
+                  --stats-one-line --exclude "/tmp/**" --exclude "/state/**")
+          # Objects are content-addressed and never rewritten, so they can be
+          # cached forever. This costs nothing today on the rate-limited r2.dev
+          # URL, and is what makes a CDN in front of the bucket worth having
+          # later: a cache hit never becomes a billed Class B operation.
+          immutable=(--header-upload "Cache-Control: public, max-age=31536000, immutable")
+          # summary and refs are the pointers that change every release.
+          mutable=(--header-upload "Cache-Control: public, max-age=60")
+
+          # Order matters, and it is the whole reason this is three commands
+          # rather than one sync. A client that reads a new summary naming
+          # objects that have not been uploaded yet gets a broken pull, so
+          # content goes up first, the pointers that make it reachable second,
+          # and only then is anything deleted.
+          echo "::group::content"
+          rclone copy site/repo "r2:${BUCKET}/repo" "${common[@]}" "${immutable[@]}" \
+            --exclude "/summary*" --exclude "/refs/**" --exclude "/config"
+          echo "::endgroup::"
+
+          echo "::group::pointers"
+          rclone copy site/repo "r2:${BUCKET}/repo" "${common[@]}" "${mutable[@]}" \
+            --include "/summary*" --include "/refs/**" --include "/config"
+          echo "::endgroup::"
+
+          echo "::group::prune"
+          rclone sync site/repo "r2:${BUCKET}/repo" "${common[@]}" --delete-after
+          echo "::endgroup::"
+
+          # Descriptors last, and published-version last of all: a scheduled
+          # run reads it to decide whether this version is already out.
+          rclone copy site "r2:${BUCKET}" "${common[@]}" "${mutable[@]}" \
+            --include "/openlogi.gpg" --include "/openlogi.flatpakrepo" \
+            --include "/*.flatpakref" --include "/index.html"
+          rclone copy site "r2:${BUCKET}" "${common[@]}" "${mutable[@]}" \
+            --include "/published-version"
+
+          echo "published to ${R2_PUBLIC_BASE:-the bucket}"
+
+      - name: Verify the published repository
+        if: steps.gate.outputs.configured == 'true'
+        env:
+          R2_PUBLIC_BASE: ${{ vars.R2_PUBLIC_BASE }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          base="${R2_PUBLIC_BASE%/}"
+          # Reading the store back over its public URL is the only check that
+          # covers the upload itself: every step above can pass while the
+          # bucket serves something a client cannot use.
+          mkdir -p verify && ostree --repo=verify init --mode=archive-z2
+          ostree --repo=verify remote add --no-gpg-verify published "${base}/repo/"
+          refs="$(ostree --repo=verify remote refs published)"
+          echo "$refs"
+          echo "$refs" | grep -q "^published:app/${FLATPAK_ID}/x86_64/stable$"
+          echo "$refs" | grep -q "^published:app/${FLATPAK_ID}/aarch64/stable$"
+          got="$(curl -fsSL "${base}/published-version")"
+          [ "$got" = "$VERSION" ] || { echo "::error::published-version is ${got}, expected ${VERSION}" >&2; exit 1; }
+          echo "verified ${VERSION} at ${base}"

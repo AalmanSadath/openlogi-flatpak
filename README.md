@@ -21,9 +21,13 @@ Software and KDE Discover in the background) keeps it current.
 
 ```sh
 flatpak remote-add --if-not-exists --user openlogi \
-  https://aalmansadath.github.io/openlogi-flatpak/openlogi.flatpakrepo
+  https://REPO-BASE-URL/openlogi.flatpakrepo
 flatpak install --user openlogi org.openlogi.OpenLogi
 ```
+
+> The repository is moving off GitHub Pages, whose 100 GB/month allowance and
+> file-hosting terms do not survive the update traffic this is heading for. The
+> URL above is filled in once the new bucket is live.
 
 ## One-time host setup
 
@@ -116,14 +120,46 @@ rewrites both for whichever release it is publishing.
 ## Publishing
 
 `.github/workflows/publish.yml` builds x86_64 and aarch64, merges them into one
-OSTree repository, signs it, and deploys to GitHub Pages. It runs on a daily
-schedule (upstream releases are not events this repository can observe) and
-exits early when the latest release is already published. A manual dispatch can
-build any tag.
+OSTree repository, signs it, and uploads it to a Cloudflare R2 bucket. It runs on
+a daily schedule (upstream releases are not events this repository can observe)
+and exits early when the latest release is already published. A manual dispatch
+can build any tag.
 
-Publishing requires a `FLATPAK_GPG_PRIVATE_KEY` secret. Without it the build
-still runs and uploads artifacts, and the publish job is skipped: a fork is inert
-rather than failing.
+### Why R2 rather than GitHub Pages
+
+Upstream releases roughly seventeen times a month. Once Flatpak is the
+recommended Linux install, an update audience in the low thousands puts several
+hundred GB a month through the remote, against a 100 GB Pages allowance that
+Pages' own terms do not intend to cover for file distribution. R2 charges nothing
+for egress, which also removes the reason to keep the retained history shallow:
+the publish job re-downloads the store it is extending on every run.
+
+R2 does bill Class B operations, and a full pull of an archive-z2 store is a few
+thousand of them because every object is its own request. Static deltas keep the
+common case to a handful. Putting the bucket behind a Cloudflare custom domain
+would serve repeat requests from cache without billing them at all, and lifts the
+rate limit the `r2.dev` development URL carries; that is the next step, not a
+finished one.
+
+### Configuration
+
+Publishing needs all of the following. Any one missing and the publish job skips
+itself, so a fork stays inert rather than red.
+
+| Kind | Name | Value |
+|---|---|---|
+| Secret | `FLATPAK_GPG_PRIVATE_KEY` | ASCII-armoured private key used to sign commits and summary |
+| Secret | `R2_ACCOUNT_ID` | Cloudflare account ID, used to build the S3 endpoint |
+| Secret | `R2_ACCESS_KEY_ID` | R2 API token, Object Read & Write, scoped to this bucket |
+| Secret | `R2_SECRET_ACCESS_KEY` | the token's secret |
+| Variable | `R2_BUCKET` | bucket name |
+| Variable | `R2_PUBLIC_BASE` | public base URL, no trailing slash, e.g. `https://pub-xxxx.r2.dev` |
+
+The upload runs in three phases, and the order is load-bearing: content first,
+then the `summary` and `refs` that make it reachable, and only then the deletion
+of what pruning removed. A single `sync` could publish a summary naming objects
+that had not been uploaded yet, which every client in the middle of an update
+would see as a broken repository.
 
 Signing covers both the summary **and** the individual commits. Clients verify
 the commit they pull, so a summary-only signature fails every install with
