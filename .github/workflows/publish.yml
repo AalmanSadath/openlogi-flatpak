@@ -220,6 +220,19 @@ jobs:
           set -euo pipefail
           shopt -s nullglob
 
+          # actions/upload-artifact does not carry empty directories, and a
+          # freshly built OSTree repo has several: refs/mirrors, refs/remotes,
+          # state, tmp/cache, extensions. `ostree refs` opendir()s
+          # refs/remotes and fails without it, so a repo that survived the
+          # artifact round-trip is not usable until they are put back. The old
+          # `pull --mirror` never noticed because it reads the source repo's
+          # summary over a file:// remote rather than listing its refs.
+          for repo in arch-repos/flatpak-repo-*; do
+            mkdir -p "$repo"/refs/heads "$repo"/refs/mirrors \
+              "$repo"/refs/remotes "$repo"/state "$repo"/tmp/cache \
+              "$repo"/extensions
+          done
+
           echo "::group::artifacts as downloaded"
           ls -la arch-repos || echo "arch-repos missing"
           for repo in arch-repos/*; do
