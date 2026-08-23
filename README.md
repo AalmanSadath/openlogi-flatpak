@@ -25,6 +25,20 @@ flatpak remote-add --if-not-exists --user openlogi \
 flatpak install --user openlogi org.openlogi.OpenLogi
 ```
 
+### Or a single file
+
+Every release here also carries a `.flatpak` bundle per architecture, so one
+download installs without adding a remote first:
+
+```sh
+flatpak install --user ./OpenLogi-v0.7.10-x86_64.flatpak
+```
+
+The bundles carry the repository above as their origin, so an app installed from
+one still updates through `flatpak update`. Use the remote if you have the
+choice; the bundle exists for air-gapped machines and for anyone who wants to
+check the thing before trusting a repository with it.
+
 ## One-time host setup
 
 A Flatpak cannot write to `/etc`, so OpenLogi's udev rules have to be installed
@@ -115,11 +129,22 @@ rewrites both for whichever release it is publishing.
 
 ## Publishing
 
-`.github/workflows/publish.yml` builds x86_64 and aarch64, merges them into one
-OSTree repository, signs it, and uploads it to a Cloudflare R2 bucket. It runs on
-a daily schedule (upstream releases are not events this repository can observe)
-and exits early when the latest release is already published. A manual dispatch
-can build any tag.
+`.github/workflows/build.yml` builds x86_64 and aarch64 and is the only place
+the build is defined. `.github/workflows/publish.yml` calls it, merges the two
+into one OSTree repository, signs it, uploads it to a Cloudflare R2 bucket, and
+attaches the bundles to a GitHub release. It runs on a daily schedule (upstream
+releases are not events this repository can observe) and exits early when the
+latest release is already published. A manual dispatch can build any tag.
+
+`build.yml` is dispatchable on its own, which gives the two `.flatpak` bundles
+as workflow artifacts and touches nothing else. It needs no secrets, so a fork
+can run it.
+
+Releases are tagged with the upstream version verbatim, `v0.7.10` and so on.
+This repository has no version of its own to number: a release here is one
+upstream release, packaged. Its bundles come out of the merged and signed store
+rather than a second build, so the file on the release page is the same commit
+the repository serves.
 
 ### Why R2 rather than GitHub Pages
 
