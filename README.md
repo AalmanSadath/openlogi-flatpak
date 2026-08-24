@@ -162,8 +162,9 @@ before trusting the above. A full pull of this store is 49 objects, because
 OpenLogi installs four binaries and a handful of icons rather than the thousands
 of files a typical desktop app carries. At the traffic modelled here that is
 about 3.4M operations a month against a 10M free tier -- and that is the worst
-case, every update a full pull with no delta applied. Storage at depth 20 is
-around 1.4 GB of a 10 GB tier. Egress, the thing that ended the Pages
+case, every update a full pull with no delta applied. Storage at the default
+`RETENTION_DEPTH` of 20 is around 1.4 GB of a 10 GB tier, and roughly 64 MB per
+release either side of that. Egress, the thing that ended the Pages
 arrangement, is 1.87 TB and free.
 
 So the Cloudflare custom domain in front of the bucket is not a cost measure. It
@@ -184,6 +185,7 @@ itself, so a fork stays inert rather than red.
 | Secret | `R2_SECRET_ACCESS_KEY` | the token's secret |
 | Variable | `R2_BUCKET` | bucket name |
 | Variable | `R2_PUBLIC_BASE` | public base URL, no trailing slash, e.g. `https://openlogi.aalman.dev` |
+| Variable | `RETENTION_DEPTH` | optional, default `20`: parents kept per ref, so 20 is 21 releases |
 
 Two more are optional, and only affect the cache purge:
 
