@@ -162,8 +162,8 @@ before trusting the above. A full pull of this store is 49 objects, because
 OpenLogi installs four binaries and a handful of icons rather than the thousands
 of files a typical desktop app carries. At the traffic modelled here that is
 about 3.4M operations a month against a 10M free tier -- and that is the worst
-case, every update a full pull with no delta applied. Storage at depth 8 is
-around 0.6 GB of a 10 GB tier. Egress, the thing that ended the Pages
+case, every update a full pull with no delta applied. Storage at depth 20 is
+around 1.4 GB of a 10 GB tier. Egress, the thing that ended the Pages
 arrangement, is 1.87 TB and free.
 
 So the Cloudflare custom domain in front of the bucket is not a cost measure. It

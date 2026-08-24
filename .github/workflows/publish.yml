@@ -170,8 +170,9 @@ jobs:
           # The seed is a full download of the retained store on every run.
           # That was the reason to keep the depth modest on GitHub Pages, where
           # it came out of a 100 GB/month allowance. R2 charges nothing for
-          # egress, so the depth is now bounded by storage (~64 MB per release
-          # across both arches) rather than by transfer.
+          # egress, so the depth is now bounded by storage rather than by
+          # transfer: about 64 MB per release across both arches, so ~1.4 GB at
+          # this depth against a 10 GB tier.
           # ostree init does not create parents.
           mkdir -p site/repo
           ostree --repo=site/repo init --mode=archive-z2
@@ -198,12 +199,13 @@ jobs:
             # said. Kept in step with --prune-depth below: N parents plus the
             # head is N+1 commits, and the new commit on top is pruned back to
             # N+1 again.
-            ostree --repo=site/repo pull --mirror --depth=8 published
+            ostree --repo=site/repo pull --mirror --depth=20 published
             seeded="$(ostree --repo=site/repo refs | wc -l)"
             echo "seeded ${seeded} ref(s)"
             # Ref count alone cannot see the failure this guard was written
             # for: six refs seeded one commit deep looks identical to six
-            # seeded nine deep, and the shallow one silently caps retention.
+            # seeded twenty-one deep, and the shallow one silently caps
+            # retention.
             seeded_refs="$(ostree --repo=site/repo refs)"
             while read -r ref; do
               [ -n "$ref" ] || continue
@@ -259,16 +261,16 @@ jobs:
           # different reason. Bytes are free here; requests are not. A full
           # pull of an archive-z2 store fetches every object as its own
           # request, a few thousand of them, while an update that can use a
-          # delta fetches a handful. --prune-depth=8 keeps the current commit
-          # plus eight, so a release that breaks something has several places
-          # to roll back to. Depth buys rollback range rather than delta
+          # delta fetches a handful. --prune-depth=20 keeps the current commit
+          # plus twenty, which at roughly seventeen upstream releases a month is
+          # about five weeks of releases to roll back to. Depth buys rollback range rather than delta
           # coverage: deltas are generated between consecutive commits, so a
           # client skipping releases still falls back to a full download
           # however deep the store is.
           flatpak build-update-repo \
             --gpg-sign="${GPG_FINGERPRINT}" \
             --generate-static-deltas \
-            --prune --prune-depth=8 \
+            --prune --prune-depth=20 \
             site/repo
           # A summary without the app refs is the failure that shipped before:
           # every step green, every client seeing an empty remote. Refuse to
