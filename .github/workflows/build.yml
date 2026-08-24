@@ -50,6 +50,7 @@ jobs:
     outputs:
       version: ${{ steps.pick.outputs.version }}
       sha256: ${{ steps.pick.outputs.sha256 }}
+      released: ${{ steps.pick.outputs.released }}
       changed: ${{ steps.pick.outputs.changed }}
     steps:
       - uses: actions/checkout@v6
@@ -73,6 +74,20 @@ jobs:
           curl -fsSL "$url" -o src.tar.gz
           sha256="$(sha256sum src.tar.gz | cut -d' ' -f1)"
 
+          # When upstream published it, not when this ran. AppStream's release
+          # date is what software centres show users as the date of the
+          # release, so the build date is the wrong answer even though it looks
+          # close enough on the day the release lands.
+          released="$(gh api "repos/${UPSTREAM}/releases/tags/${version}" \
+            --jq '.published_at' 2>/dev/null | cut -c1-10 || true)"
+          if [ -z "$released" ]; then
+            # A tag with no GitHub release behind it. Rare, and the tag's own
+            # commit date is still a truthful answer.
+            released="$(gh api "repos/${UPSTREAM}/commits/${version}" \
+              --jq '.commit.committer.date' | cut -c1-10)"
+          fi
+          echo "published upstream on ${released}"
+
           # Skip a scheduled run that would rebuild what is already published.
           # A manual dispatch always proceeds, so a failed publish can be redone.
           # `github.event_name` here is the caller's event, so a scheduled
@@ -87,8 +102,11 @@ jobs:
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
-          echo "sha256=${sha256}" >> "$GITHUB_OUTPUT"
+          {
+            echo "version=${version}"
+            echo "sha256=${sha256}"
+            echo "released=${released}"
+          } >> "$GITHUB_OUTPUT"
 
   build:
     name: Build (${{ matrix.arch }})
@@ -124,11 +142,12 @@ jobs:
         env:
           VERSION: ${{ needs.resolve.outputs.version }}
           SHA256: ${{ needs.resolve.outputs.sha256 }}
+          RELEASED: ${{ needs.resolve.outputs.released }}
         run: |
           set -euo pipefail
-          python3 - "$VERSION" "$SHA256" <<'PY'
-          import re, sys, datetime
-          version, sha256 = sys.argv[1], sys.argv[2]
+          python3 - "$VERSION" "$SHA256" "$RELEASED" <<'PY'
+          import re, sys
+          version, sha256, released = sys.argv[1], sys.argv[2], sys.argv[3]
           bare = version.lstrip("v")
 
           path = "org.openlogi.OpenLogi.yml"
@@ -141,10 +160,9 @@ jobs:
           # stale <release> advertises the wrong one whatever the build contains.
           path = "org.openlogi.OpenLogi.metainfo.xml"
           text = open(path, encoding="utf-8").read()
-          today = datetime.date.today().isoformat()
           text = re.sub(
               r'<release version="[^"]*" date="[^"]*"/>',
-              f'<release version="{bare}" date="{today}"/>',
+              f'<release version="{bare}" date="{released}"/>',
               text,
               count=1,
           )
