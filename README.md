@@ -206,12 +206,22 @@ ref file. Never "purge everything" -- that would drop the immutable objects and
 deltas too, and every client mid-update would refetch them from R2 as billed
 reads, which is the exact cost the year-long cache on them exists to avoid.
 
-The purge is insurance rather than a fix today. The cache rule matches
-`/repo/objects/` and `/repo/deltas/` only, so the pointers are not cached at the
-edge to begin with and `cf-cache-status` on them reads `DYNAMIC`. It becomes
-load-bearing the moment that rule widens or Cloudflare's default eligibility
-changes, and a stale `summary` is a repository that looks broken to every
-client.
+The purge is what makes caching those paths safe at all. Two cache rules sit in
+front of the bucket: content addressed paths (`objects`, `deltas`,
+`delta-indexes`) for a year, and everything mutable for a day. A day rather than
+a year because the purge is what normally clears them, and the TTL is only the
+ceiling on how wrong the edge can be if a purge ever fails.
+
+`published-version` is deliberately outside both rules. It is read by the
+`resolve` job to decide whether upstream is already published, so it is the one
+file whose reader is this workflow rather than a user. Caching it saves one read
+a day and risks a scheduled run rebuilding a release that is already out, which
+costs a full build and a commit on every ref.
+
+A stale pointer is not a broken repository, incidentally: clients keep seeing the
+previous release, whose objects are still retained by `--prune-depth`. The
+dangerous case is the reverse, a summary naming objects that are not uploaded
+yet, and that is what the three phase order above prevents.
 
 Signing covers both the summary **and** the individual commits. Clients verify
 the commit they pull, so a summary-only signature fails every install with
