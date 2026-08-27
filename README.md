@@ -22,6 +22,7 @@ Software and KDE Discover in the background) keeps it current.
 ```sh
 flatpak remote-add --if-not-exists --user openlogi \
   https://openlogi.aalman.dev/openlogi.flatpakrepo
+
 flatpak install --user openlogi org.openlogi.OpenLogi
 ```
 
